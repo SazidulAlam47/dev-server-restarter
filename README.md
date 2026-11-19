@@ -14,7 +14,7 @@ A lightweight and productivity-focused extension that adds **Run (Blue)**, **Sto
   - Suggests history as you type.
   - Delete individual unwanted commands from history with a single click on the trash icon `$(trash)`.
 - **Attached Mode Terminal**:
-  - Automatically spins up a dedicated `Command Runner` terminal.
+  - Automatically spins up a dedicated `Dev Server Restarter` terminal.
   - Executes long-running tasks, dev servers (`odoo-bin`, `python app.py`, `npm run dev`, etc.).
 - **Dynamic State Buttons**:
   - When idle: Shows blue **Play (Run)** button.
