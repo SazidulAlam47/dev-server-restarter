@@ -1,0 +1,80 @@
+{
+  "name": "dev-server-restarter",
+  "displayName": "Dev Server Restarter (Odoo & Terminal)",
+  "description": "One-click Run, Stop (Ctrl+C), and Instant Restart for Odoo, Python, Node and development servers from the editor title bar.",
+  "version": "1.0.0",
+  "publisher": "sazidul-alam",
+  "author": "Sazidul Alam",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "icon": "media/icon.png",
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "terminalRunner.run",
+        "title": "Run Server Command",
+        "icon": {
+          "light": "./media/play-blue.svg",
+          "dark": "./media/play-blue.svg"
+        }
+      },
+      {
+        "command": "terminalRunner.restart",
+        "title": "Restart Server Command",
+        "icon": {
+          "light": "./media/restart-green.svg",
+          "dark": "./media/restart-green.svg"
+        }
+      },
+      {
+        "command": "terminalRunner.stop",
+        "title": "Stop Server Command",
+        "icon": {
+          "light": "./media/stop-red.svg",
+          "dark": "./media/stop-red.svg"
+        }
+      },
+      {
+        "command": "terminalRunner.clearHistory",
+        "title": "Clear Server Runner History"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "terminalRunner.run",
+          "when": "!terminalRunner.isRunning",
+          "group": "navigation@1"
+        },
+        {
+          "command": "terminalRunner.restart",
+          "when": "terminalRunner.isRunning",
+          "group": "navigation@1"
+        },
+        {
+          "command": "terminalRunner.stop",
+          "when": "terminalRunner.isRunning",
+          "group": "navigation@2"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run build",
+    "build": "node esbuild.js",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.80.0",
+    "esbuild": "^0.20.0"
+  }
+}
