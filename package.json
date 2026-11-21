@@ -2,7 +2,7 @@
   "name": "dev-server-restarter",
   "displayName": "Dev Server Restarter (Odoo & Terminal)",
   "description": "One-click Run, Stop (Ctrl+C), and Instant Restart for Odoo, Python, Node and development servers from the editor title bar.",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "publisher": "sazidul-alam",
   "author": "Sazidul Alam",
   "engines": {
@@ -65,6 +65,16 @@
           "group": "navigation@2"
         }
       ]
+    },
+    "configuration": {
+      "title": "Dev Server Restarter",
+      "properties": {
+        "devServerRestarter.restartDelayMs": {
+          "type": "number",
+          "default": 1000,
+          "description": "Delay in milliseconds between stopping the server (Ctrl+C) and sending the restart command. Recommended 1000ms-1500ms for WSL, Odoo, and Python servers."
+        }
+      }
     }
   },
   "scripts": {

@@ -3,6 +3,7 @@ import * as vscode from "vscode";
 let runnerTerminal: vscode.Terminal | undefined;
 let activeCommand: string = "";
 let isRunning: boolean = false;
+let isRestarting: boolean = false;
 let statusBarItem: vscode.StatusBarItem;
 
 const HISTORY_KEY = "terminalRunner.commandHistory";
@@ -46,22 +47,23 @@ export function activate(context: vscode.ExtensionContext) {
     const stopDisposable = vscode.commands.registerCommand(
         "terminalRunner.stop",
         () => {
-            if (!runnerTerminal) {
-                vscode.window.showInformationMessage(
-                    "No active terminal process is running.",
-                );
-                setRunningState(false);
-                return;
-            }
+            isRestarting = false;
+            const terminal = getOrCreateTerminal();
 
-            // Send ASCII ETX (0x03), equivalent to pressing Ctrl+C in terminal
-            runnerTerminal.sendText("\x03", false);
+            // Send Ctrl+C (0x03) twice to gracefully but firmly terminate Python/Odoo workers
+            terminal.sendText("\x03", false);
+            setTimeout(() => {
+                if (terminal.exitStatus === undefined) {
+                    terminal.sendText("\x03", false);
+                }
+            }, 250);
+
             setRunningState(false);
             vscode.window.showInformationMessage(`Stopped: ${activeCommand}`);
         },
     );
 
-    // 3. Restart Command (Ctrl+C -> Re-execute)
+    // 3. Restart Command (Ctrl+C -> Re-execute with WSL / Odoo support)
     const restartDisposable = vscode.commands.registerCommand(
         "terminalRunner.restart",
         () => {
@@ -72,18 +74,33 @@ export function activate(context: vscode.ExtensionContext) {
                 return;
             }
 
-            if (runnerTerminal) {
-                // First stop any current process
-                runnerTerminal.sendText("\x03", false);
-            }
+            const config = vscode.workspace.getConfiguration("devServerRestarter");
+            const delayMs = config.get<number>("restartDelayMs", 1000);
 
-            // Wait a short moment for shell prompt to be ready, then send command again
+            isRestarting = true;
+            setRunningState(true);
+
+            const terminal = getOrCreateTerminal();
+
+            // Send Ctrl+C twice (Odoo often asks 'Hit CTRL-C again to force quit')
+            terminal.sendText("\x03", false);
             setTimeout(() => {
-                executeCommandInTerminal(context, activeCommand);
+                if (terminal.exitStatus === undefined) {
+                    terminal.sendText("\x03", false);
+                }
+            }, 250);
+
+            // Wait for WSL bash prompt to be ready, then send command again
+            setTimeout(() => {
+                const activeTerm = getOrCreateTerminal();
+                activeTerm.show(false);
+                activeTerm.sendText(activeCommand, true);
+                isRestarting = false;
+                setRunningState(true);
                 vscode.window.showInformationMessage(
                     `Restarted: ${activeCommand}`,
                 );
-            }, 400);
+            }, delayMs);
         },
     );
 
@@ -101,24 +118,19 @@ export function activate(context: vscode.ExtensionContext) {
     // Watch for terminal close
     const closeDisposable = vscode.window.onDidCloseTerminal(
         (closedTerminal) => {
-            if (runnerTerminal && closedTerminal === runnerTerminal) {
+            if (
+                closedTerminal === runnerTerminal ||
+                closedTerminal.name === "Dev Server Restarter"
+            ) {
+                if (isRestarting) {
+                    // Do not reset while in the middle of a restart cycle
+                    return;
+                }
                 runnerTerminal = undefined;
                 setRunningState(false);
             }
         },
     );
-
-    // Optional shell execution end detection (VS Code 1.93+)
-    if ("onDidEndTerminalShellExecution" in (vscode.window as any)) {
-        const shellEndDisposable = (
-            vscode.window as any
-        ).onDidEndTerminalShellExecution((e: any) => {
-            if (runnerTerminal && e.terminal === runnerTerminal) {
-                setRunningState(false);
-            }
-        });
-        context.subscriptions.push(shellEndDisposable);
-    }
 
     context.subscriptions.push(
         runDisposable,
@@ -148,10 +160,10 @@ function updateStatusBar() {
         statusBarItem.command = "terminalRunner.stop";
         statusBarItem.tooltip = `Running: "${activeCommand}"\nClick to Stop (or use Title Bar buttons)`;
     } else {
-        statusBarItem.text = "$(play) Run Command";
+        statusBarItem.text = "$(play) Run Server";
         statusBarItem.command = "terminalRunner.run";
         statusBarItem.tooltip =
-            "Run a terminal command (with history suggestions)";
+            "Run a server command (with history suggestions)";
     }
 }
 
@@ -160,21 +172,41 @@ function truncate(str: string, maxLen: number): string {
     return str.length > maxLen ? str.slice(0, maxLen - 1) + "…" : str;
 }
 
+function getOrCreateTerminal(): vscode.Terminal {
+    // 1. Check existing reference
+    if (
+        runnerTerminal &&
+        vscode.window.terminals.includes(runnerTerminal) &&
+        runnerTerminal.exitStatus === undefined
+    ) {
+        return runnerTerminal;
+    }
+
+    // 2. Look for any existing terminal named "Dev Server Restarter"
+    const existing = vscode.window.terminals.find(
+        (t) => t.name === "Dev Server Restarter" && t.exitStatus === undefined,
+    );
+    if (existing) {
+        runnerTerminal = existing;
+        return runnerTerminal;
+    }
+
+    // 3. Create fresh terminal if none found
+    runnerTerminal = vscode.window.createTerminal({
+        name: "Dev Server Restarter",
+        iconPath: new vscode.ThemeIcon("server-process"),
+    });
+    return runnerTerminal;
+}
+
 function executeCommandInTerminal(
     context: vscode.ExtensionContext,
     command: string,
 ) {
-    // Ensure we have a valid terminal instance
-    if (!runnerTerminal || runnerTerminal.exitStatus !== undefined) {
-        runnerTerminal = vscode.window.createTerminal({
-            name: "Dev Server Restarter",
-            iconPath: new vscode.ThemeIcon("server-process"),
-        });
-    }
-
+    const terminal = getOrCreateTerminal();
     activeCommand = command;
-    runnerTerminal.show(false);
-    runnerTerminal.sendText(command, true);
+    terminal.show(false);
+    terminal.sendText(command, true);
     setRunningState(true);
 }
 
@@ -185,7 +217,7 @@ async function promptForCommand(
     return new Promise((resolve) => {
         const quickPick = vscode.window.createQuickPick();
         quickPick.placeholder =
-            "Type a server command (e.g. odoo-bin, npm run dev), or pick from history...";
+            "Type a server command (e.g. ./odoo/odoo-bin -c odoo.conf), or pick from history...";
         quickPick.title = "Dev Server Restarter: Run Command";
         quickPick.matchOnDescription = true;
 
