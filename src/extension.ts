@@ -212,6 +212,10 @@ async function promptForCommand(
                     description: "$(history) Previous command",
                     buttons: [
                         {
+                            iconPath: new vscode.ThemeIcon("reply"),
+                            tooltip: "Insert into input box",
+                        },
+                        {
                             iconPath: new vscode.ThemeIcon("trash"),
                             tooltip: "Delete from history",
                         },
@@ -229,13 +233,20 @@ async function promptForCommand(
         });
 
         quickPick.onDidTriggerItemButton(async (e) => {
-            // Trash button clicked to delete item from history
-            const itemToDelete = e.item.label;
-            const updated = history.filter((h) => h !== itemToDelete);
-            await context.globalState.update(HISTORY_KEY, updated);
-            history.length = 0;
-            history.push(...updated);
-            quickPick.items = buildItems(quickPick.value);
+            const iconId = (e.button.iconPath as vscode.ThemeIcon).id;
+            if (iconId === "reply") {
+                // Populate input box so user can modify and run
+                quickPick.value = e.item.label;
+                quickPick.items = buildItems(quickPick.value);
+            } else if (iconId === "trash") {
+                // Trash button clicked to delete item from history
+                const itemToDelete = e.item.label;
+                const updated = history.filter((h) => h !== itemToDelete);
+                await context.globalState.update(HISTORY_KEY, updated);
+                history.length = 0;
+                history.push(...updated);
+                quickPick.items = buildItems(quickPick.value);
+            }
         });
 
         quickPick.onDidAccept(() => {
