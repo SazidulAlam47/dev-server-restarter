@@ -4,6 +4,8 @@ let runnerTerminal: vscode.Terminal | undefined;
 let activeCommand: string = "";
 let isRunning: boolean = false;
 let isRestarting: boolean = false;
+let hasActiveExecution: boolean = false;
+let restartFallbackTimer: NodeJS.Timeout | undefined;
 let statusBarItem: vscode.StatusBarItem;
 
 const HISTORY_KEY = "terminalRunner.commandHistory";
@@ -48,22 +50,28 @@ export function activate(context: vscode.ExtensionContext) {
         "terminalRunner.stop",
         () => {
             isRestarting = false;
+            if (restartFallbackTimer) {
+                clearTimeout(restartFallbackTimer);
+                restartFallbackTimer = undefined;
+            }
+
             const terminal = getOrCreateTerminal();
 
             // Send Ctrl+C (0x03) twice to gracefully but firmly terminate Python/Odoo workers
             terminal.sendText("\x03", false);
             setTimeout(() => {
-                if (terminal.exitStatus === undefined) {
+                if (hasActiveExecution && terminal.exitStatus === undefined) {
                     terminal.sendText("\x03", false);
                 }
             }, 250);
 
+            hasActiveExecution = false;
             setRunningState(false);
             vscode.window.showInformationMessage(`Stopped: ${activeCommand}`);
         },
     );
 
-    // 3. Restart Command (Ctrl+C -> Re-execute with WSL / Odoo support)
+    // 3. Restart Command (Event-driven lifecycle restart without blind delays)
     const restartDisposable = vscode.commands.registerCommand(
         "terminalRunner.restart",
         () => {
@@ -74,33 +82,57 @@ export function activate(context: vscode.ExtensionContext) {
                 return;
             }
 
-            const config = vscode.workspace.getConfiguration("devServerRestarter");
-            const delayMs = config.get<number>("restartDelayMs", 1000);
+            const terminal = getOrCreateTerminal();
+            terminal.show(false);
 
+            if (restartFallbackTimer) {
+                clearTimeout(restartFallbackTimer);
+                restartFallbackTimer = undefined;
+            }
+
+            // Case A: If process is already idle/stopped, start immediately without delay
+            if (!hasActiveExecution) {
+                isRestarting = false;
+                hasActiveExecution = true;
+                terminal.sendText(activeCommand, true);
+                setRunningState(true);
+                vscode.window.showInformationMessage(
+                    `Started: ${activeCommand}`,
+                );
+                return;
+            }
+
+            // Case B: Process is actively running. Terminate and wait for shell prompt!
             isRestarting = true;
             setRunningState(true);
 
-            const terminal = getOrCreateTerminal();
-
-            // Send Ctrl+C twice (Odoo often asks 'Hit CTRL-C again to force quit')
+            // Send Ctrl+C
             terminal.sendText("\x03", false);
+
+            // Send backup Ctrl+C after 250ms for multi-worker processes like Odoo
             setTimeout(() => {
-                if (terminal.exitStatus === undefined) {
+                if (isRestarting && hasActiveExecution) {
                     terminal.sendText("\x03", false);
                 }
             }, 250);
 
-            // Wait for WSL bash prompt to be ready, then send command again
-            setTimeout(() => {
-                const activeTerm = getOrCreateTerminal();
-                activeTerm.show(false);
-                activeTerm.sendText(activeCommand, true);
-                isRestarting = false;
-                setRunningState(true);
-                vscode.window.showInformationMessage(
-                    `Restarted: ${activeCommand}`,
-                );
-            }, delayMs);
+            // Safety fallback timer: in case shell integration is inactive on the machine
+            const config = vscode.workspace.getConfiguration("devServerRestarter");
+            const fallbackMs = config.get<number>("restartDelayMs", 3000);
+
+            restartFallbackTimer = setTimeout(() => {
+                if (isRestarting) {
+                    isRestarting = false;
+                    hasActiveExecution = true;
+                    const activeTerm = getOrCreateTerminal();
+                    activeTerm.show(false);
+                    activeTerm.sendText(activeCommand, true);
+                    setRunningState(true);
+                    vscode.window.showInformationMessage(
+                        `Restarted: ${activeCommand}`,
+                    );
+                }
+            }, fallbackMs);
         },
     );
 
@@ -115,18 +147,70 @@ export function activate(context: vscode.ExtensionContext) {
         },
     );
 
-    // Watch for terminal close
+    // 5. Watch for terminal execution START (detects when a command begins)
+    if ("onDidStartTerminalShellExecution" in vscode.window) {
+        const startDisposable = (
+            vscode.window as any
+        ).onDidStartTerminalShellExecution((e: any) => {
+            if (isTargetTerminal(e.terminal)) {
+                hasActiveExecution = true;
+                const cmd = e.execution?.commandLine?.value;
+                if (cmd && typeof cmd === "string" && cmd.trim() && cmd.trim() !== "\x03") {
+                    activeCommand = cmd.trim();
+                }
+                setRunningState(true);
+            }
+        });
+        context.subscriptions.push(startDisposable);
+    }
+
+    // 6. Watch for terminal execution END (real-time detection of Ctrl+C, stop, or exit)
+    if ("onDidEndTerminalShellExecution" in vscode.window) {
+        const endDisposable = (
+            vscode.window as any
+        ).onDidEndTerminalShellExecution((e: any) => {
+            if (isTargetTerminal(e.terminal)) {
+                hasActiveExecution = false;
+
+                if (isRestarting) {
+                    // Running command has fully terminated and bash prompt is back!
+                    isRestarting = false;
+                    if (restartFallbackTimer) {
+                        clearTimeout(restartFallbackTimer);
+                        restartFallbackTimer = undefined;
+                    }
+
+                    // Minimal 50ms tick to allow bash to finish rendering prompt
+                    setTimeout(() => {
+                        const activeTerm = getOrCreateTerminal();
+                        activeTerm.show(false);
+                        activeTerm.sendText(activeCommand, true);
+                        hasActiveExecution = true;
+                        setRunningState(true);
+                        vscode.window.showInformationMessage(
+                            `Restarted: ${activeCommand}`,
+                        );
+                    }, 50);
+                } else {
+                    // Manual Ctrl+C by user, server process crash, or normal exit
+                    setRunningState(false);
+                }
+            }
+        });
+        context.subscriptions.push(endDisposable);
+    }
+
+    // 7. Watch for terminal close
     const closeDisposable = vscode.window.onDidCloseTerminal(
         (closedTerminal) => {
-            if (
-                closedTerminal === runnerTerminal ||
-                closedTerminal.name === "Dev Server Restarter"
-            ) {
-                if (isRestarting) {
-                    // Do not reset while in the middle of a restart cycle
-                    return;
-                }
+            if (isTargetTerminal(closedTerminal)) {
                 runnerTerminal = undefined;
+                hasActiveExecution = false;
+                isRestarting = false;
+                if (restartFallbackTimer) {
+                    clearTimeout(restartFallbackTimer);
+                    restartFallbackTimer = undefined;
+                }
                 setRunningState(false);
             }
         },
@@ -139,6 +223,17 @@ export function activate(context: vscode.ExtensionContext) {
         clearHistoryDisposable,
         closeDisposable,
     );
+}
+
+function isTargetTerminal(t: vscode.Terminal): boolean {
+    if (runnerTerminal && t === runnerTerminal) {
+        return true;
+    }
+    if (t.name === "Dev Server Restarter") {
+        runnerTerminal = t;
+        return true;
+    }
+    return false;
 }
 
 function setRunningState(running: boolean) {
@@ -205,6 +300,7 @@ function executeCommandInTerminal(
 ) {
     const terminal = getOrCreateTerminal();
     activeCommand = command;
+    hasActiveExecution = true;
     terminal.show(false);
     terminal.sendText(command, true);
     setRunningState(true);
